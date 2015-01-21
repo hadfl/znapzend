@@ -18,9 +18,14 @@ has schema => sub {
             validator   => $sv->dataSet(),
             description => 'source dataset',
         },
-        plan        => {
-            validator   => $sv->backupPlan(),
-            description => 'source dataset backup plan',
+        plan    => {
+            members => {
+                '\d+[yMwdhms]' => {
+                    regex => 1,
+                    validator   => $sv->regexp(qr/^\d+[yMwdhms]$/),
+                    description => 'source dataset backup plan element',
+                },
+            },
         },
         destinations => {
             optional => 1,
@@ -30,9 +35,14 @@ has schema => sub {
                     validator   => $sv->dataSet(),
                     description => 'destination dataset',
                 },
-                plan        => {
-                    validator   => $sv->backupPlan(),
-                    description => 'destination dataset backup plan',
+                plan    => {
+                    members => {
+                        '\d+[yMwdhms]' => {
+                            regex => 1,
+                            validator   => $sv->backupPlan(),
+                            description => 'destination dataset backup plan',
+                        },
+                    },
                 },
                 worker_cfg  => {
                     description => 'dummy entry. this will be replaced once the worker is loaded',
@@ -75,11 +85,15 @@ has cfg => sub {
     {
         recursive => 'on',
         dataset => 'tank/test',
-        plan => '1w=>1h',
+        plan => {
+            '1w' => '1h',
+        },
         destinations => [
             {
                 dataset => 'backuptank/test',
-                plan => '1w=>1h',
+                plan => {
+                    '1w' => '1h',
+                },
                 worker => 'default',
                 worker_cfg => {
                     mbuffer => 'mbuffer',
@@ -87,7 +101,9 @@ has cfg => sub {
             },
             {
                 dataset => 'backuptank/test2',
-                plan => '1w=>12h',
+                plan => {
+                    '1w' => '12h',
+                },
                 worker => 'network',
                 worker_cfg => {
                     mbuffer => 'mbuffer',
