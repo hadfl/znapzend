@@ -62,58 +62,39 @@ has schema => sub {
     };
 
     return {
-        %$backItem,
-        recursive       => {
-            validator   => $sv->elemOf(qw(on off)),
-            description => 'recursive backup',
-        },
-        subdatasets  => {
-            optional => 1,
-            array    => 1,
-            members  => {
-                %$backItem,
+        GLOBAL => {
+            members => {
+                workers => {
+                    members => {
+                    },
+                },
             },
         },
-        arraytest => {
+        BACKUPSETS => {
             array => 1,
-            validator => $sv->regexp(qr/^\d+$/, 'element must be numeric'),
+            members => {
+                %$backItem,
+                recursive       => {
+                    validator   => $sv->elemOf(qw(on off)),
+                    description => 'recursive backup',
+                },
+                subdatasets  => {
+                    optional => 1,
+                    array    => 1,
+                    members  => {
+                        %$backItem,
+                    },
+                },
+                arraytest => {
+                    array => 1,
+                    validator => $sv->regexp(qr/^\d+$/, 'element must be numeric'),
+                },
+            },
         },
     };
 };
 
-has cfg => sub {
-    {
-        recursive => 'on',
-        dataset => 'tank/test',
-        plan => {
-            '1w' => '1h',
-        },
-        destinations => [
-            {
-                dataset => 'backuptank/test',
-                plan => {
-                    '1w' => '1h',
-                },
-                worker => 'default',
-                worker_cfg => {
-                    mbuffer => 'mbuffer',
-                },
-            },
-            {
-                dataset => 'backuptank/test2',
-                plan => {
-                    '1w' => '12h',
-                },
-                worker => 'network',
-                worker_cfg => {
-                    mbuffer => 'mbuffer',
-                    mbuffer_port => '9200',
-                },
-            },
-        ],
-        arraytest => [0, 2, 3, 4],
-    }
-};
+has cfg => sub { die "must provide a config\n"; };
 
 has workerInventory => sub {
     my $self   = shift;
@@ -141,10 +122,11 @@ sub snapWorker {
 
     my $dp = Data::Processor->new(schema => $self->schema);
 
-    my @error = $dp->validate(data => $self->cfg, verbose => 1)->as_array();
+    my @error = $dp->validate(data => $self->cfg, verbose => 0)->as_array();
 
+#    print Dumper $self->cfg;
+#    print Dumper $self->schema;
     print Dumper @error;
-    print Dumper $self->cfg;
 }
 
 sub sendWorker {
@@ -157,7 +139,8 @@ sub loadWorker {
     my $workerName = shift;
     my $cfg        = shift;
     my $file = $self->workerInventory->{$workerName} or do {
-        $self->log->error("Worker Module $workerName not found");
+       # $self->log->error("Worker Module $workerName not found");
+       die "module '$workerName' not found\n";
     };
     require $file->{file};
     no strict 'refs';
@@ -167,6 +150,36 @@ sub loadWorker {
         die {msg => $_};
     }
     $workerObj->cfg($cfg);
+
+    #global schema; references for convenience
+    my $globSect       = $self->schema->{GLOBAL}->{members};
+    my $workerGlobSect = $workerObj->globSchema;
+
+    for my $item (keys %$workerGlobSect){
+        #don't process 'workers'
+        next if $item eq 'workers';
+
+        if (!exists $globSect->{$item}){
+            $globSect->{$item} = $workerGlobSect->{$item};
+        }
+        else{
+            if (my $validator = $globSect->{$item}->{validator}){
+                $globSect->{$item}->{validator} = sub {
+                    return $validator->(@_) // $workerGlobSect->{$item}->{validator}->(@_);
+                };
+            }
+            else{
+                $globSect->{$item}->{validator} = sub {
+                    return $workerGlobSect->{$item}->{validator}->(@_);
+                };
+            }
+        }
+    }
+
+    #class specific schema
+    $globSect->{workers}->{members}->{$workerName}
+        = $workerGlobSect->{workers}->{members}->{$workerName};
+    
     return $workerObj;
 }
 

@@ -1,7 +1,6 @@
 package ZnapZend::Worker::default;
 
 use Mojo::Base -base;
-use Data::Processor;
 use ZnapZend::Utils;
 
 has schema => sub {
@@ -12,6 +11,29 @@ has schema => sub {
         mbuffer => {
             validator   => $sv->regexp(qr/mbuffer/),
             description => 'mbuffer path backup',
+        },
+    };
+};
+
+has globSchema => sub {
+    my $self = shift;
+    my $sv = ZnapZend::Utils->new();
+
+    return {
+        zfs => {
+            validator => $sv->file('<'),
+        },
+        workers => {
+            members => {
+                default => {
+                    members => {
+                        mbuffer => {
+                            optional => 1,
+                            validator => $sv->file('<'),
+                        },
+                    },
+                },
+            },
         },
     };
 };

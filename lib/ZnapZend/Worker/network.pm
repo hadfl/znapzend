@@ -1,7 +1,6 @@
 package ZnapZend::Worker::network;
 
-use Mojo::Base -base;
-use base qw(ZnapZend::Worker::default);
+use Mojo::Base 'ZnapZend::Worker::default';
 use Data::Processor;
 use ZnapZend::Utils;
 
@@ -12,6 +11,28 @@ has schema => sub {
         mbuffer_port => {
             validator => $sv->regexp(qr/^\d+$/),
          },
+    };
+};
+
+has globSchema => sub {
+    my $self = shift;
+    my $sv = ZnapZend::Utils->new();
+
+    return {
+        zfs => {
+            validator => $sv->regexp(qr/^[\w\/]+$/),
+        },
+        workers => {
+            members => {
+                network => {
+                    members => {
+                        mbuffer => {
+                            validator => $sv->file('<'),
+                        },
+                    },
+                },
+            },
+        },
     };
 };
 
