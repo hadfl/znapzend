@@ -1,256 +1,202 @@
 package ZnapZend::Config;
 
 use Mojo::Base -base;
-use ZnapZend::ZFS;
-use ZnapZend::Time;
-use Text::ParseWords qw(shellwords);
+use Data::Processor;
+use ZnapZend::Utils;
+use Data::Dumper;
 
-### attributes ###
-has debug    => sub { 0 };
-has noaction => sub { 0 };
-has pfexec   => sub { 0 };
-has sudo     => sub { 0 };
-
-#mandatory properties
-has mandProperties => sub {
-    {
-        enabled       => 'on|off',
-        recursive     => 'on|off',
-        src           => '###dataset###',
-        src_plan      => '###backupplan###',
-        tsformat      => '###tsformat###',
-        pre_znap_cmd  => '###command###',
-        post_znap_cmd => '###command###',
-    }
+has workerPath => sub {
+    ['ZnapZend::Worker'];
 };
 
-has zfs  => sub { my $self = shift; ZnapZend::ZFS->new(pfexec => $self->pfexec, sudo => $self->sudo); };
-has time => sub { ZnapZend::Time->new(); };
-
-has backupSets => sub { [] };
-
-### private functions ###
-my $splitHostDataSet = sub { return ($_[0] =~ /^(?:([^:]+):)?([^:]+)$/); };
-
-### private methods ###
-my $checkBackupPlan = sub {
+has schema => sub {
     my $self = shift;
-    my $backupPlan = lc shift;
-    my $returnBackupPlan;
+    my $sv   = ZnapZend::Utils->new(); 
 
-    $backupPlan =~ s/\s+//g; #remove all unnecessary whitespaces
-    my @planItems = split /,/, $backupPlan;
+    my $backItem = {
+        dataset     => {
+            validator   => $sv->dataSet(),
+            description => 'source dataset',
+            example     => 'tank/data',
+        },
+        plan    => {
+            members => {
+                '\d+[yMwdhms]' => {
+                    regex       => 1,
+                    validator   => $sv->regexp(qr/^\d+[yMwdhms]$/),
+                    description => 'source dataset backup plan element (\d+[yMwdhms])',
+                    example     => "1d => '1h'",
+                },
+            },
+        },
+        destinations => {
+            optional => 1,
+            array    => 1,
+            members  => {
+                ssh_options => {
+                    optional => 1,
+                    validator   => $sv->regexp(qr/.*/),
+                    description => 'ssh options for destination host',
+                    example     => '-o Compression=yes -o CompressionLevel=1'
+                        . '-o Cipher=arcfour -o batchMode=yes -o ConnectTimeout=30',
+                    default     => '-o Compression=yes -o CompressionLevel=1'
+                        . '-o Cipher=arcfour -o batchMode=yes -o ConnectTimeout=30',
+                },
+                worker_cfg  => {
+                    description => 'dummy entry. this will be replaced once the worker is loaded',
+                },
+                worker      => {
+                    description => 'Worker Module to load for this backup destination',
+                    transformer => sub {
+                        my ($value, $parent) = @_;
+                        return {
+                            name => $value,
+                            obj  => $self->loadWorker($value, $parent->{worker_cfg}),
+                        };
+                    },
+                },
+            },
+        },
+    };
 
-    for my $planItem (@planItems){
-        my @planValues = split /=>/, $planItem, 2;
-
-        my $time = $self->time->checkTimeUnit($planValues[0])
-            or die "ERROR: backup plan $backupPlan is not valid\n";
-
-        $returnBackupPlan .= "$time=>";
-        $time = $self->time->checkTimeUnit($planValues[1])
-            or die "ERROR: backup plan $backupPlan is not valid\n";
-
-        $returnBackupPlan .= "$time,";
-    }
-    # remove trailing comma
-    $returnBackupPlan =~ s/,$//;
-
-    return $returnBackupPlan;
+    return {
+        GLOBAL => {
+            members => {
+                binaries => {
+                    members => {
+                        zfs => {
+                            validator => $sv->file('<'),
+                        },
+                    },
+                },
+                workers => {
+                    members => {
+                    },
+                },
+            },
+        },
+        BACKUPSETS => {
+            array => 1,
+            members => {
+                %$backItem,
+                recursive       => {
+                    validator   => $sv->elemOf(qw(on off)),
+                    description => 'recursive backup',
+                },
+                subdatasets  => {
+                    optional => 1,
+                    array    => 1,
+                    members  => {
+                        %$backItem,
+                    },
+                },
+                arraytest => {
+                    array => 1,
+                    validator => $sv->regexp(qr/^\d+$/, 'element must be numeric'),
+                },
+            },
+        },
+    };
 };
 
-my $checkBackupSets = sub {
-    my $self = shift;
+has cfg => sub { die "must provide a config\n"; };
 
-    for my $backupSet (@{$self->backupSets}){
-        for my $prop (keys %{$self->mandProperties}){
-            exists $backupSet->{$prop}
-                or die "ERROR: property $prop not set on backup for " . $backupSet->{src} . "\n";
-                
-            for ($self->mandProperties->{$prop}){
-                #check mandatory properties
-                /^###backupplan###$/ && do {
-                    $backupSet->{$prop} = $self->$checkBackupPlan($backupSet->{$prop});
-                    last;
-                };
-                /^###dataset###$/ && do {
-                    $self->zfs->dataSetExists($backupSet->{$prop})
-                        or die 'ERROR: filesystem ' . $backupSet->{$prop} . " does not exist\n";
-                    last;
-                };
-                /^###tsformat###$/ && do {
-                    $self->time->checkTimeFormat($backupSet->{$prop})
-                        or die "ERROR: timestamp format not valid. check your syntax\n";
-                    last;
-                };
-                /^###command###$/ && do {
-                    last if $backupSet->{$prop} eq 'off';
-                    
-                    my $file = (shellwords($backupSet->{$prop}))[0];
-                    $self->zfs->fileExistsAndExec($file)
-                        or die "ERROR: property $prop: executable '$file' does not exist or can't be executed\n";
-                    last;
-                };
-                #check if properties are valid
-                my @values = split /\|/, $self->mandProperties->{$prop}, 2;
-                my $value = $backupSet->{$prop};
-                grep { /^$value$/ } @values
-                    or die "ERROR: property $prop is not valid on dataset " . $backupSet->{src} . "\n";
+has workerInventory => sub {
+    my $self   = shift;
+    my $workerPath = $self->workerPath;
+    my %workers;
+    for my $path (@INC){
+        for my $pPath (@$workerPath) {
+            my @pDirs = split /::/, $pPath;
+            my $fPath = File::Spec->catdir($path, @pDirs, '*.pm');
+            for my $file (glob($fPath)) {
+                my ($volume, $modulePath, $moduleName) = File::Spec->splitpath($file);
+                $moduleName =~ s/\.pm$//;
+                $workers{$moduleName} = {
+                    module => $pPath . '::' . $moduleName,
+                    file   => $file
+                }
             }
         }
-        #check destination plans and datasets
-        for my $dst (grep { /^dst_[^_]+$/ } keys %$backupSet){
-            #store backup destination validity. will be checked where used
-            $backupSet->{$dst . '_valid'} = $self->zfs->dataSetExists($backupSet->{$dst});
+    }
+    return \%workers;
+};
 
-            #if a backup destination is given, we also need a plan
-            $backupSet->{$dst . '_plan'} or die "ERROR: no backup plan given for destination\n";
+sub snapWorker {
+    my $self = shift;
 
-            $backupSet->{$dst . '_plan'} = $self->$checkBackupPlan($backupSet->{$dst . '_plan'});
+    my $dp = Data::Processor->new($self->schema);
 
-            # mbuffer property set? check if executable is available on remote host
-            if ($backupSet->{mbuffer} ne 'off'){
-                my ($mbuffer, $mbufferPort) = split /:/, $backupSet->{mbuffer}, 2;
-                my ($remote, $dataset) = $splitHostDataSet->($backupSet->{$dst});
-                my $file = ($remote ? "$remote:" : '') . $mbuffer;
-                $self->zfs->fileExistsAndExec($file)
-                    or warn "*** WARNING: executable '$mbuffer' does not exist on $remote\n\n";
+    my @error = $dp->validate($self->cfg)->as_array;
 
-                #check if mbuffer size is valid
-                $backupSet->{mbuffer_size} =~ /^\d+[bkMG%]?$/
-                    or die "ERROR: mbuffer size '" . $backupSet->{mbuffer_size} . "' invalid\n";
-                #check if port is numeric
-                $mbufferPort && do {
-                    $mbufferPort =~ /^\d{1,5}$/ && int($mbufferPort) < 65535
-                        or die "ERROR: $mbufferPort not a valid port number\n";
+#    print Dumper $self->cfg;
+#    print Dumper $self->schema;
+    print Dumper @error;
+}
+
+sub sendWorker {
+    my $self = shift;
+    print "sendWorker\n";
+}
+
+my $mergeSchema;
+$mergeSchema = sub {
+    my $self = shift;
+    my $globSect = shift;
+    my $workerGlobSect = shift;
+
+    for my $item (keys %$workerGlobSect){
+        #don't process 'workers'
+        next if $item eq 'workers';
+        
+        exists $workerGlobSect->{$item}->{members}
+            && $self->$mergeSchema($globSect->{$item}->{members}, $workerGlobSect->{$item}->{members});
+
+        if (!exists $globSect->{$item}){
+            $globSect->{$item} = $workerGlobSect->{$item};
+        }
+        else{
+            if (my $validator = $globSect->{$item}->{validator}){
+                $globSect->{$item}->{validator} = sub {
+                    return $validator->(@_) // $workerGlobSect->{$item}->{validator}->(@_);
+                };
+            }
+            elsif (defined $workerGlobSect->{$item}->{validator}){
+                $globSect->{$item}->{validator} = sub {
+                    $workerGlobSect->{$item}->{validator}->(@_)
                 };
             }
         }
-        #drop destination plans where destination is not given (e.g. calling create w/o a destination but a plan
-        for my $dst (grep { /^dst_[^_]+_plan$/ } keys %$backupSet){
-            $dst =~ s/_plan//; #remove trailing '_plan' so we get destination
-            
-            #remove destination plan if destination is not specified
-            exists $backupSet->{$dst} or delete $backupSet->{$dst . '_plan'};
-        }
     }
-    return 1;
 };
 
-my $getBackupSet = sub {
-    my $self = shift;
-    my $enabledOnly = shift;
-    my $dataSet = shift;
+
+sub loadWorker {
+    my $self       = shift;
+    my $workerName = shift;
+    my $cfg        = shift;
+    my $file = $self->workerInventory->{$workerName} or do {
+       # $self->log->error("Worker Module $workerName not found");
+       die "module '$workerName' not found\n";
+    };
+    require $file->{file};
+    #no strict 'refs';
+    my $workerObj = "$file->{module}"->new();
+    my $validator = Data::Processor->new($workerObj->schema);
+    for ($validator->validate($cfg)->as_array){
+        die {msg => $_};
+    }
+    $workerObj->cfg($cfg);
+
+    #merge global schema
+    $self->$mergeSchema($self->schema->{GLOBAL}->{members}, $workerObj->globSchema);
+
+    #class specific schema
+    $self->schema->{GLOBAL}->{members}->{workers}->{members}->{$workerName}
+        = $workerObj->globSchema->{workers}->{members}->{$workerName};
     
-    #get all backup sets and check if valid
-    $self->backupSets($self->zfs->getDataSetProperties($dataSet));
-    $self->$checkBackupSets();
-
-    if ($enabledOnly){
-        my @backupSets;
-
-        for my $backupSet (@{$self->backupSets}){
-            push @backupSets, $backupSet if $backupSet->{enabled} eq 'on';
-        }
-        #return enabled only backup sets
-        return \@backupSets;
-    }
-    #return all available backup sets
-    return $self->backupSets;
-};
-
-sub getBackupSet {
-    my $self = shift;
-
-    return $self->$getBackupSet(0, @_);
-}
-
-sub getBackupSetEnabled {
-    my $self = shift;
-
-    return $self->$getBackupSet(1, @_);
-}
-
-sub checkBackupSet {
-    my $self = shift;
-    my $cfg = shift;
-
-    $self->backupSets([$cfg]);
-    $self->$checkBackupSets();
-
-    return $self->backupSets->[0];
-}
-
-sub setBackupSet {
-    my $self = shift;
-    my $cfg = shift;
-    
-    #main program should check backup set prior to set it. anyway, check again just to be sure
-    $self->checkBackupSet($cfg);
-
-    #delete existing backup set in case some settings have been removed
-    $self->deleteBackupSet($self->backupSets->[0]->{src});
-
-    $self->zfs->setDataSetProperties($self->backupSets->[0]->{src}, $self->backupSets->[0]);
-
-    return 1;
-}
-
-sub deleteBackupSet {
-    my $self = shift;
-    my $dataSet = shift;
-
-    $self->zfs->deleteDataSetProperties($dataSet);
-
-    return 1;
-}
-
-sub deleteBackupDestination {
-    my $self = shift;
-    my $dataSet = shift;
-    my $dst = shift;
-
-    $self->zfs->deleteBackupDestination($dataSet, $dst);
-
-    return 1;
-}
-
-sub enableBackupSet {
-    my $self = shift;
-    my $dataSet = shift;
-
-    $self->zfs->dataSetExists($dataSet) or die "ERROR: dataset $dataSet does not exist\n";
-
-    $self->backupSets($self->zfs->getDataSetProperties($dataSet));
-
-    if (@{$self->backupSets}){
-        my %cfg = %{$self->backupSets->[0]};
-        $cfg{enabled} = 'on';
-        $self->setBackupSet(\%cfg);
-
-        return 1;
-    }
-
-    return 0;
-}
-
-sub disableBackupSet {
-    my $self = shift;
-    my $dataSet = shift;
-
-    $self->zfs->dataSetExists($dataSet) or die "ERROR: dataset $dataSet does not exist\n";
-
-    $self->backupSets($self->zfs->getDataSetProperties($dataSet));
-
-    if (@{$self->backupSets}){
-        my %cfg = %{$self->backupSets->[0]};
-        $cfg{enabled} = 'off';
-        $self->setBackupSet(\%cfg);
-
-        return 1;
-    }
-
-    return 0;
+#    print Dumper $self->schema;
+    return $workerObj;
 }
 
 1;
@@ -259,70 +205,38 @@ __END__
 
 =head1 NAME
 
-ZnapZend::Config - znapzend config class
+ZnapZend::Worker::default - default class for implementing znapzend plugins
 
 =head1 SYNOPSIS
 
-use ZnapZend::Config;
+use ZnapZend::Config::Item
 ...
-my $zConfig = ZnapZend::Config->new(\%cfg, noaction => 0, debug => 0);
+my $znapCfgItem = ZnapZend::Config::Item->new();
 ...
 
 =head1 DESCRIPTION
 
-reads and writes znapzend backup configuration
+default plugin for znapzend
 
 =head1 ATTRIBUTES
 
-=head2 debug
+=head2 confSchema
 
-print debug information to STDERR
-
-=head2 noaction
-
-do a dry run. no changes to the filesystem will be performed
-
-=head2 cfg
-
-keeps the backup configuration to be set
+configuration schema template
 
 =head1 METHODS
 
-=head2 getBackupSet
+=head2 snapWorker
 
-returns the backup settings for a dataset or all datasets if dataset is omitted
+snapshot worker
 
-=head2 getBackupSetEnabled
+=head2 sendWorker
 
-as getBackupSet but returns only backup sets which are enabled
-
-=head2 checkBackupSet
-
-checks a backup set validity.
-
-=head2 setBackupSet
-
-stores the backup settings (in attribute cfg) to the dataset
-
-=head2 deleteBackupSet
-
-deletes a backup set (does NOT remove snapshots)
-
-=head2 deleteBackupDestination
-
-removes a destination from a backup set
-
-=head2 enableBackupSet
-
-enables a backup set
-
-=head2 disableBackupSet
-
-disables a backup set
+send/recv worker
 
 =head1 COPYRIGHT
 
-Copyright (c) 2014 by OETIKER+PARTNER AG. All rights reserved.
+Copyright (c) 2015 by OETIKER+PARTNER AG. All rights reserved.
 
 =head1 LICENSE
 
@@ -341,14 +255,12 @@ this program. If not, see L<http://www.gnu.org/licenses/>.
 
 =head1 AUTHOR
 
-S<Tobias Oetiker E<lt>tobi@oetiker.chE<gt>>
+S<Tobias Oetiker E<lt>tobi@oetiker.chE<gt>>,
 S<Dominik Hassler E<lt>hadfl@cpan.orgE<gt>>
 
 =head1 HISTORY
 
-2014-06-29 had Flexible snapshot time format
-2014-06-01 had Multi destination backup
-2014-05-30 had Initial Version
+ 2015-01-20 had Initial Version
 
 =cut
 

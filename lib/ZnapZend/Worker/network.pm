@@ -19,8 +19,12 @@ has globSchema => sub {
     my $sv = ZnapZend::Utils->new();
 
     return {
-        zfs => {
-            validator => $sv->regexp(qr/^[\w\/]+$/),
+        binaries => {
+            members => {
+                ssh => {
+                    validator => $sv->regexp(qr/^[\w\/]+$/),
+                },
+            },
         },
         workers => {
             members => {

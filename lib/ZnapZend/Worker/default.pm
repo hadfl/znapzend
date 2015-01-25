@@ -8,6 +8,21 @@ has schema => sub {
     my $sv   = ZnapZend::Utils->new(); 
 
     return {
+        dataset     => {
+            validator   => $sv->dataSet(),
+            description => 'destination dataset',
+            example     => 'root@backupdest:backuptank/bakdata',
+        },
+        plan    => {
+            members => {
+                '\d+[yMwdhms]' => {
+                    regex => 1,
+                    validator   => $sv->regexp(qr/^\d+[yMwdhms]$/),
+                    description => 'destination dataset backup plan element (\d+[yMwdhms])',
+                    example     => "1d => '1h'",
+                },
+            },
+        },
         mbuffer => {
             validator   => $sv->regexp(qr/mbuffer/),
             description => 'mbuffer path backup',
@@ -20,8 +35,12 @@ has globSchema => sub {
     my $sv = ZnapZend::Utils->new();
 
     return {
-        zfs => {
-            validator => $sv->file('<'),
+        binaries => {
+            members => {
+                ssh => {
+                    validator => $sv->file('<'),
+                },
+            },
         },
         workers => {
             members => {
