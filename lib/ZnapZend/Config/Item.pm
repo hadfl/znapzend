@@ -120,9 +120,9 @@ has workerInventory => sub {
 sub snapWorker {
     my $self = shift;
 
-    my $dp = Data::Processor->new(schema => $self->schema);
+    my $dp = Data::Processor->new($self->schema);
 
-    my @error = $dp->validate(data => $self->cfg, verbose => 0)->as_array();
+    my @error = $dp->validate($self->cfg)->as_array;
 
 #    print Dumper $self->cfg;
 #    print Dumper $self->schema;
@@ -145,8 +145,8 @@ sub loadWorker {
     require $file->{file};
     no strict 'refs';
     my $workerObj = "$file->{module}"->new();
-    my $validator = Data::Processor->new(schema => $workerObj->schema);
-    for ($validator->validate(data => $cfg)->as_array){
+    my $validator = Data::Processor->new($workerObj->schema);
+    for ($validator->validate($cfg)->as_array){
         die {msg => $_};
     }
     $workerObj->cfg($cfg);
